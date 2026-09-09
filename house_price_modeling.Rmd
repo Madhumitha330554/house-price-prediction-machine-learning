@@ -1,0 +1,551 @@
+---
+title: "House Price Prediction & Quality Classification"
+output: html_document
+---
+
+> Portfolio version of a collaborative analytics project. This analysis covers data preparation, exploratory analysis, regression, Random Forest, XGBoost classification, class-imbalance handling, and model evaluation.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+## Libraries
+
+```{r}
+library(readxl)
+library(GoodmanKruskal)
+library(corrplot)
+library(performance)
+library(parameters)
+library(forcats)
+library(car)
+library(caret)
+library(Metrics)
+library(tidyverse)
+library(tidymodels)
+library(glmnet) 
+library(vip)
+library(xgboost)
+library(ROSE)
+library(DMwR2)
+```
+
+## Load Data
+
+```{r}
+data1 = read.csv("data/house_prices_train.csv")
+data2 = read_excel("data/house_prices_test.xlsx")
+data2 <- as.data.frame(data2)
+data2[, sapply(data2, is.numeric)] <- lapply(data2[, sapply(data2, is.numeric)], as.integer)
+dim(data1)
+dim(data2)
+
+```
+
+### Missing Values
+
+```{r}
+print(sum(is.na(data1)))
+print(sum(is.na(data2)))
+
+```
+
+### Duplicate Rows
+
+```{r}
+data1[duplicated(data1) | duplicated(data1, fromLast = TRUE), ]
+data2[duplicated(data2) | duplicated(data2, fromLast = TRUE), ]
+
+```
+
+### Remove Unnecessary Variables
+
+```{r}
+drop_cols = c("YearBuilt")
+data1[drop_cols] = NULL
+data2[drop_cols] = NULL
+```
+
+### Variable Transformations
+
+```{r}
+breaks_1 <- c(1949, 2000, 2011)
+data1$YearRemodAdd <- cut(data1$YearRemodAdd, 
+                          breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
+data2$YearRemodAdd <- cut(data2$YearRemodAdd, 
+                          breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
+
+breaks_2 <- c(0, 5, 10, 15)
+data1$TotRmsAbvGrd <- cut(data1$TotRmsAbvGrd, 
+                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
+data2$TotRmsAbvGrd <- cut(data2$TotRmsAbvGrd, 
+                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
+
+breaks_3 <- c(-1, 5, 15)
+data1$BedroomAbvGr <- cut(data1$BedroomAbvGr, 
+                          breaks = breaks_3, labels = c("less than or equal to 5", "More than 5"))
+data2$BedroomAbvGr <- cut(data2$BedroomAbvGr, 
+                          breaks = breaks_3, labels = c("less than or equal to 5", "More than 5"))
+
+```
+
+
+### Factor Conversion
+
+```{r}
+cols = c("YrSold","FullBath",
+         "HalfBath","BedroomAbvGr","TotRmsAbvGrd",
+         "Fireplaces","YearRemodAdd","OverallQual")
+data1[cols] = lapply(data1[cols], factor)
+data2[cols] = lapply(data2[cols], factor)
+summary(data1)
+summary(data2)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+
+# House price #
+ggplot(data1, aes(x = SalePrice)) +
+  geom_histogram(fill = "blue", color = "black") +
+  xlab("Sales Price $") +
+  ylab("Frequency") +
+  ggtitle("Distribution of Sales Price") +
+  scale_x_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+  theme_minimal()
+
+
+# Garage size #
+ggplot(data1, aes(x = GarageArea)) +
+  geom_histogram(fill = "blue", color = "black") +
+  xlab("Garage size in squre feet") +
+  ylab("Frequency") +
+  ggtitle("Distribution of Garage Size")  +
+  theme_minimal()
+
+
+# Finished suqres size #
+ggplot(data1, aes(x = BsmtFinSF1)) +
+  geom_histogram(fill = "blue", color = "black") +
+  xlab("Finish squre feet size") +
+  ylab("Frequency") +
+  ggtitle("Distribution of Finish squre feet size")  +
+  theme_minimal()
+
+
+# OverallQual
+count_table <- table(data1$OverallQual)
+count_df <- as.data.frame(count_table)
+colnames(count_df)[colnames(count_df) == "Var1"] <- "Overall_Quality"
+count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
+ggplot(count_df, aes(x = Overall_Quality, y = Percentage, fill = Overall_Quality)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
+  xlab("Overall Quality Level") +
+  ylab("Percentage") +
+  ggtitle("Overall Quality") 
+
+
+# YearRemodAdd
+count_table <- table(data1$YearRemodAdd)
+count_df <- as.data.frame(count_table)
+colnames(count_df)[colnames(count_df) == "Var1"] <- "Year_RemodAdd"
+count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
+ggplot(count_df, aes(x = Year_RemodAdd, y = Percentage, fill = Year_RemodAdd)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
+  xlab("Modified Year") +
+  ylab("Percentage") +
+  ggtitle("Modified Year") 
+
+
+# Full bathrooms
+count_table <- table(data1$FullBath)
+count_df <- as.data.frame(count_table)
+colnames(count_df)[colnames(count_df) == "Var1"] <- "FullBath"
+count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
+ggplot(count_df, aes(x = FullBath, y = Percentage, fill = FullBath)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
+  xlab("Number of full bathrooms") +
+  ylab("Percentage") +
+  ggtitle("Number of full bathrooms") 
+
+
+# LotArea vs FullBath
+ggplot(data1, aes(x = FullBath, y = LotArea, fill = FullBath)) +
+  geom_boxplot() +
+  xlab("Category") +
+  ylab("Lot size in square feet") +
+  ggtitle("Number of full bathrooms vs Lot size in square feet") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# BsmtFinSF1 vs OverallQual
+ggplot(data1, aes(x = OverallQual, y = BsmtFinSF1, fill = OverallQual)) +
+  geom_boxplot() +
+  xlab("Category") +
+  ylab("Finished squre size in feet") +
+  ggtitle("Overall Quality vs Finished squre size in feet") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# LotArea vs SalePrice vs Number of full baths
+ggplot(data1, aes(x = LotArea, y = SalePrice, color = FullBath)) +
+  geom_point() +
+  labs(title = "Scatterplot", x = "LotArea", y = "SalePrice") +
+  xlab("Lot area size in square feet") +
+  ylab("Sales Price $") +
+  ggtitle("Sales Price vs Lot area size in square feet vs Number of full baths") +
+  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+  theme_minimal()
+
+# GarageArea vs SalePrice vs Fireplaces
+ggplot(data1, aes(x = GarageArea, y = SalePrice, color = Fireplaces)) +
+  geom_point() +
+  labs(title = "Scatterplot", x = "GarageArea", y = "SalePrice") +
+  xlab("Garage size size in square feet") +
+  ylab("Sales Price $") +
+  ggtitle("Sales Price vs Garagae size in square feet vs Number of fire places") +
+  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+  theme_minimal()
+
+# BsmtFinSF1 vs SalePrice vs HalfBath
+ggplot(data1, aes(x = BsmtFinSF1, y = SalePrice, color = HalfBath)) +
+  geom_point() +
+  labs(title = "Scatterplot", x = "BsmtFinSF1", y = "SalePrice") +
+  xlab("Finished squre size in feet") +
+  ylab("Sales Price $") +
+  ggtitle("Sales Price vs Finished squre size in feet vs Number of Half bathrooms") +
+  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+  theme_minimal()
+
+
+# SalePrice vs YrSold
+ggplot(data1, aes(x = YrSold, y = SalePrice, fill = YrSold)) +
+  geom_boxplot() +
+  xlab("House Sold Year") +
+  ylab("Sales Price $") +
+  ggtitle("House Sold Year vs Sales Price") +
+  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+####  Correlation test
+##### Spearman Correlation
+
+```{r}
+cor_vars <- subset(data1, select = c("LotArea", "GarageArea", "BsmtFinSF1"))
+corrplot(cor(cor_vars, method = "spearman"), method = "color", addCoef.col = "black", tl.col = "black")
+
+
+```
+
+#####  Goodman Kruskal plot
+
+```{r}
+selected_vars <- c("FullBath", "HalfBath", "OverallQual", "BedroomAbvGr", "TotRmsAbvGrd", "Fireplaces", "YrSold")
+kruskal_vars <- subset(data1, select = selected_vars)
+plot(GKtauDataframe(kruskal_vars))
+
+```
+
+## House Price Regression
+
+###  Create a linear regression model
+
+```{r}
+lm_model <- train(SalePrice ~ ., data = data1, method = "lm")
+
+
+```
+
+#### Model Performances
+
+
+```{r}
+predictions <- predict(lm_model, newdata = data2)
+mse <- mean((data2$SalePrice - predictions)^2)
+cat("MSE:", mse, "\n")
+rmse <- sqrt(mse)
+print(paste("Root Mean Squared Error: ", rmse))
+r_squared_value <- cor(data2$SalePrice, predictions)^2
+cat("R-squared:", r_squared_value, "\n")
+
+```
+
+### Random Forest Model - Without Hyper-parameter tuning
+
+
+```{r}
+set.seed(345)
+model_rf <- train(SalePrice ~ ., data = data1, method = "rf")
+
+```
+
+####  Random Forest Model - Model Performances
+
+
+```{r}
+predictions_rf_1 <- predict(model_rf, newdata = data2)
+mse_rf_1 <- mean((data2$SalePrice - predictions_rf_1)^2)
+print(paste("Mean Squared Error: ", mse_rf_1))
+rmse_rf_1 <- sqrt(mse_rf_1)
+print(paste("Root Mean Squared Error: ", rmse_rf_1))
+r_squared_value_rf_1 <- R2(data2$SalePrice, predictions_rf_1)
+cat("R-squared:", r_squared_value_rf_1, "\n")
+
+```
+
+###  Random Forest Model - With Hyper-parameter tuning
+
+
+```{r}
+set.seed(345)
+ctrl <- trainControl(method = "cv", number = 7)
+grid <- expand.grid(mtry = c(2, 4, 6, 8),
+                    min_samples_split = c(2, 5, 10, 15),
+                    max_depth = c(5, 10, 15, 20))
+model_rf_2 <- train(SalePrice ~ ., data = data1, method = "rf", trControl = ctrl)
+
+```
+
+#### Random Forest Model - Model Performances
+
+
+```{r}
+predictions_rf_2 <- predict(model_rf_2, newdata = data2)
+mse_rf_2 <- mean((data2$SalePrice - predictions_rf_1)^2)
+rmse_rf_2 <- sqrt(mse_rf_2)
+print(paste("Mean Squared Error: ", mse_rf_2))
+print(paste("Root Mean Squared Error: ", rmse_rf_2))
+r_squared_value_rf_2 <- R2(data2$SalePrice, predictions_rf_2)
+cat("R-squared:", r_squared_value_rf_2, "\n")
+
+```
+
+
+## House Quality Classification
+
+
+#### Load the data sets
+
+```{r}
+data1 = read.csv("data/house_prices_train.csv")
+data2 = read_excel("data/house_prices_test.xlsx")
+data2 <- as.data.frame(data2)
+data2[, sapply(data2, is.numeric)] <- lapply(data2[, sapply(data2, is.numeric)], as.integer)
+```
+
+
+#### Drop columns
+
+
+```{r}
+drop_cols = c("YearBuilt")
+data1[drop_cols] = NULL
+data2[drop_cols] = NULL
+```
+
+#### Variable Conversions
+
+```{r}
+breaks_1 <- c(1949, 2000, 2011)
+data1$YearRemodAdd <- cut(data1$YearRemodAdd, 
+                               breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
+data2$YearRemodAdd <- cut(data2$YearRemodAdd, 
+                              breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
+
+breaks_2 <- c(0, 5, 10, 15)
+data1$TotRmsAbvGrd <- cut(data1$TotRmsAbvGrd, 
+                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
+data2$TotRmsAbvGrd <- cut(data2$TotRmsAbvGrd, 
+                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
+
+breaks_3 <- c(-1, 5, 15)
+data1$BedroomAbvGr <- cut(data1$BedroomAbvGr, 
+                          breaks = breaks_3, labels = c("less than or equal to", "More than 5"))
+data2$BedroomAbvGr <- cut(data2$BedroomAbvGr, 
+                          breaks = breaks_3, labels = c("less than or equal to", "More than 5"))
+
+```
+
+
+#### Factorized
+
+```{r}
+cols = c("YrSold","FullBath",
+         "HalfBath","BedroomAbvGr","TotRmsAbvGrd",
+         "Fireplaces","YearRemodAdd")
+data1[cols] = lapply(data1[cols], factor)
+data2[cols] = lapply(data2[cols], factor)
+```
+
+#### Create the Response and other missing levels
+
+```{r}
+training_levels_1 <- levels(data1$FullBath)
+training_levels_2 <- levels(data1$BedroomAbvGr)
+training_levels_3 <- levels(data1$Fireplaces)
+data2$FullBath <- forcats::fct_expand(data2$FullBath, training_levels_1)
+data2$BedroomAbvGr <- forcats::fct_expand(data2$BedroomAbvGr, training_levels_2)
+data2$Fireplaces <- forcats::fct_expand(data2$Fireplaces, training_levels_3)
+
+
+data1$OverallQual <- cut(data1$OverallQual,breaks = c(-Inf, 6, Inf),labels = c("0", "1"))
+data2$OverallQual <- cut(data2$OverallQual,breaks = c(-Inf, 6, Inf),labels = c("0", "1"))
+data1$OverallQual <-factor(data1$OverallQual,levels = c("0","1"),labels = c(0,1))
+data2$OverallQual <- factor(data2$OverallQual,levels = c("0","1"),labels = c(0,1))
+data1$OverallQual <- relevel(data1$OverallQual, ref = "1")
+data2$OverallQual <- relevel(data2$OverallQual, ref = "1")
+response_col_name <- "OverallQual"
+test_labels <- factor(data2[, response_col_name])
+```
+
+
+#### Imbalanceness of the response variable
+
+```{r} 
+
+count_table <- table(data1$OverallQual)
+count_df <- as.data.frame(count_table)
+colnames(count_df)[colnames(count_df) == "Var1"] <- "Overall_Quality"
+count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
+ggplot(count_df, aes(x = Overall_Quality, y = Percentage, fill = Overall_Quality)) +
+  geom_bar(stat = "identity", color = "black") +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
+  xlab("Overall Quality Level") +
+  ylab("Percentage") +
+  ggtitle("Overall Quality") 
+```
+
+#### XGBoost Model (Without any sampling) - With hyper parameter tuning
+
+
+```{r}
+customSummary <- function(data, lev = NULL, model = NULL) {
+  confusionMatrixObj <- confusionMatrix(data$pred, data$obs, positive = lev[1])
+  precision <- posPredValue(data$pred, data$obs, positive = lev[1])
+  recall <- confusionMatrixObj$byClass["Sensitivity"]
+  F1 <- 2 * precision * recall / (precision + recall)
+  
+  out <- c(precision, recall, F1)
+  names(out) <- c("Precision", "Recall", "F1-Score")
+  out
+}
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  search = 'grid',
+  savePredictions = "all",
+  summaryFunction = customSummary
+)
+
+grid <- expand.grid(
+  nrounds = c(50, 100),         # Number of boosting rounds
+  max_depth = c(3, 6, 9),          # Maximum tree depth
+  eta = c(0.01, 0.1, 1),           # Learning rate
+  gamma = 0,                    # Minimum loss reduction for further splits
+  colsample_bytree = c(0, 1),         # Subsample ratio of columns when constructing each tree
+  min_child_weight = c(0, 1),         # Minimum sum of instance weight (hessian) needed in a child
+  subsample = c(1, 4, 8)                 # Subsample ratio of the training instance
+)
+
+set.seed(345)
+model1 <- train(
+  OverallQual ~ .,
+  data = data1,
+  method = "xgbTree", 
+  trControl = ctrl,
+  tuneGrid = grid
+)
+
+```
+
+
+#### XGBoost Model (Without any sampling) - With hyper parameter tuning (Model Performances)
+
+
+```{r}
+predictions1 <- predict(model1, data2)
+confusionMatrix(predictions1, data2$OverallQual, mode = "everything")
+
+```
+
+
+#### XGBoost Model (Oversampling) - With hyper parameter tuning
+
+
+```{r}
+set.seed(345)
+table(data1$OverallQual)
+data3 <- ovun.sample(OverallQual ~ ., data = data1, method = "over", N = 1116)$data
+set.seed(345)
+model2 <- train(
+  OverallQual ~ .,
+  data = data3,
+  method = "xgbTree", 
+  trControl = ctrl,
+  tuneGrid = grid
+)
+
+```
+
+
+#### XGBoost Model (Oversampling) - With hyper parameter tuning (Model Performances)
+
+
+```{r}
+predictions2 <- predict(model2, data2)
+confusionMatrix(predictions2, data2$OverallQual, mode = "everything")
+
+```
+
+
+#### XGBoost Model (Undersampling) - With hyper parameter tuning 
+
+
+```{r}
+set.seed(345)
+data4 <- ovun.sample(OverallQual ~ ., data = data1, method = "under", N = 684)$data
+model3 <- train(
+  OverallQual ~ .,
+  data = data4,
+  method = "xgbTree", 
+  trControl = ctrl,
+  tuneGrid = grid
+)
+
+```
+
+
+#### XGBoost Model (Undersampling) - With hyper parameter tuning (Model Performances)
+
+
+```{r}
+predictions3 <- predict(model3, data2)
+confusionMatrix(predictions3, data2$OverallQual, mode = "everything")
+
+```
+
+
+#### VIP plot XGBoost Model (Undersampling)
+
+
+```{r}
+
+vip(model3$finalModel, num_features = 10) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12)
+  )
+
+```
