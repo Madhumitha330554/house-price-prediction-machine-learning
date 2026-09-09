@@ -318,7 +318,7 @@ model_rf_2 <- train(SalePrice ~ ., data = data1, method = "rf", trControl = ctrl
 
 ```{r}
 predictions_rf_2 <- predict(model_rf_2, newdata = data2)
-mse_rf_2 <- mean((data2$SalePrice - predictions_rf_1)^2)
+mse_rf_2 <- mean((data2$SalePrice - predictions_rf_2)^2)
 rmse_rf_2 <- sqrt(mse_rf_2)
 print(paste("Mean Squared Error: ", mse_rf_2))
 print(paste("Root Mean Squared Error: ", rmse_rf_2))
