@@ -170,3 +170,11 @@ house-price-prediction-machine-learning/
 ├── house_price_modeling.Rmd
 ├── .gitignore
 └── README.md
+```
+
+
+## Project Context
+
+This project demonstrates an end-to-end machine learning workflow for residential property analytics, covering data preparation, exploratory data analysis, feature engineering, regression modeling, classification, class imbalance handling, model evaluation, and interpretation of results.
+
+The project was developed in R using housing data, with Multiple Linear Regression and Random Forest evaluated for house price prediction and XGBoost evaluated for property quality classification.
