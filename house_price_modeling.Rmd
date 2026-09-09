@@ -23,17 +23,17 @@ library(Metrics)
 library(tidyverse)
 library(tidymodels)
 library(glmnet) 
-library(vip)
+# library(vip)
 library(xgboost)
 library(ROSE)
-library(DMwR2)
+# library(DMwR2)
 ```
 
 ## Load Data
 
 ```{r}
-data1 = read.csv("data/house_prices_train.csv")
-data2 = read_excel("data/house_prices_test.xlsx")
+data1 = read.csv("house_prices_train.csv")
+data2 = read_excel("house_prices_test.xlsx")
 data2 <- as.data.frame(data2)
 data2[, sapply(data2, is.numeric)] <- lapply(data2[, sapply(data2, is.numeric)], as.integer)
 dim(data1)
