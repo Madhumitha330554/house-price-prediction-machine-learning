@@ -1,551 +1,1071 @@
 ---
 title: "House Price Prediction & Quality Classification"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
 ---
 
-> Portfolio version of a collaborative analytics project. This analysis covers data preparation, exploratory analysis, regression, Random Forest, XGBoost classification, class-imbalance handling, and model evaluation.
+## Project Overview
+
+This project analyzes residential housing data to understand the factors that influence property values and to build predictive models for house prices and overall property quality.
+
+The workflow includes data preparation, exploratory data analysis, feature engineering, regression modeling, Random Forest modeling, XGBoost classification, class-imbalance handling, model evaluation, and feature importance analysis.
+
+Two predictive problems are addressed:
+
+1. Predicting house sale prices using regression models.
+2. Classifying houses by overall quality using machine learning.
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-```
-## Libraries
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
 
-```{r}
+required_packages <- c(
+  "readxl",
+  "ggplot2",
+  "randomForest",
+  "xgboost"
+)
+
+missing_packages <- required_packages[
+  !required_packages %in% rownames(installed.packages())
+]
+
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages)
+}
+
 library(readxl)
-library(GoodmanKruskal)
-library(corrplot)
-library(performance)
-library(parameters)
-library(forcats)
-library(car)
-library(caret)
-library(Metrics)
-library(tidyverse)
-library(tidymodels)
-library(glmnet) 
-# library(vip)
+library(ggplot2)
+library(randomForest)
 library(xgboost)
-library(ROSE)
-# library(DMwR2)
 ```
 
 ## Load Data
 
-```{r}
-data1 = read.csv("house_prices_train.csv")
-data2 = read_excel("house_prices_test.xlsx")
-data2 <- as.data.frame(data2)
-data2[, sapply(data2, is.numeric)] <- lapply(data2[, sapply(data2, is.numeric)], as.integer)
-dim(data1)
-dim(data2)
+The repository contains separate training and test datasets.
 
+```{r}
+train_raw <- read.csv("house_prices_train.csv")
+test_raw <- read_excel("house_prices_test.xlsx")
+
+test_raw <- as.data.frame(test_raw)
+
+# Convert numeric Excel columns consistently
+test_raw[, sapply(test_raw, is.numeric)] <-
+  lapply(test_raw[, sapply(test_raw, is.numeric)], as.numeric)
+
+cat("Training data dimensions:", dim(train_raw), "\n")
+cat("Test data dimensions:", dim(test_raw), "\n")
 ```
 
-### Missing Values
+## Data Quality Checks
 
 ```{r}
-print(sum(is.na(data1)))
-print(sum(is.na(data2)))
+cat("Missing values in training data:",
+    sum(is.na(train_raw)), "\n")
 
+cat("Missing values in test data:",
+    sum(is.na(test_raw)), "\n")
+
+cat("Duplicate rows in training data:",
+    sum(duplicated(train_raw)), "\n")
+
+cat("Duplicate rows in test data:",
+    sum(duplicated(test_raw)), "\n")
 ```
 
-### Duplicate Rows
+## Data Preparation
+
+The same preprocessing steps are applied to both the training and test datasets.
 
 ```{r}
-data1[duplicated(data1) | duplicated(data1, fromLast = TRUE), ]
-data2[duplicated(data2) | duplicated(data2, fromLast = TRUE), ]
+prepare_data <- function(df) {
 
+  # Remove YearBuilt because YearRemodAdd captures related information
+  if ("YearBuilt" %in% names(df)) {
+    df$YearBuilt <- NULL
+  }
+
+  # Remodel year categories
+  df$YearRemodAdd <- cut(
+    df$YearRemodAdd,
+    breaks = c(1949, 2000, 2011),
+    labels = c(
+      "on or before 2000",
+      "after 2000"
+    ),
+    include.lowest = TRUE
+  )
+
+  # Total rooms categories
+  df$TotRmsAbvGrd <- cut(
+    df$TotRmsAbvGrd,
+    breaks = c(0, 5, 10, 15),
+    labels = c(
+      "0-5",
+      "5-10",
+      "10-15"
+    ),
+    include.lowest = TRUE
+  )
+
+  # Bedroom categories
+  df$BedroomAbvGr <- cut(
+    df$BedroomAbvGr,
+    breaks = c(-1, 5, 15),
+    labels = c(
+      "less than or equal to 5",
+      "More than 5"
+    ),
+    include.lowest = TRUE
+  )
+
+  df
+}
+
+train_reg <- prepare_data(train_raw)
+test_reg <- prepare_data(test_raw)
 ```
 
-### Remove Unnecessary Variables
+### Factor Variables
 
 ```{r}
-drop_cols = c("YearBuilt")
-data1[drop_cols] = NULL
-data2[drop_cols] = NULL
-```
+factor_cols <- c(
+  "YrSold",
+  "FullBath",
+  "HalfBath",
+  "BedroomAbvGr",
+  "TotRmsAbvGrd",
+  "Fireplaces",
+  "YearRemodAdd",
+  "OverallQual"
+)
 
-### Variable Transformations
+for (col in factor_cols) {
 
-```{r}
-breaks_1 <- c(1949, 2000, 2011)
-data1$YearRemodAdd <- cut(data1$YearRemodAdd, 
-                          breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
-data2$YearRemodAdd <- cut(data2$YearRemodAdd, 
-                          breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
+  train_levels <- unique(as.character(train_reg[[col]]))
 
-breaks_2 <- c(0, 5, 10, 15)
-data1$TotRmsAbvGrd <- cut(data1$TotRmsAbvGrd, 
-                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
-data2$TotRmsAbvGrd <- cut(data2$TotRmsAbvGrd, 
-                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
+  unknown_test_levels <- setdiff(
+    unique(as.character(test_reg[[col]])),
+    train_levels
+  )
 
-breaks_3 <- c(-1, 5, 15)
-data1$BedroomAbvGr <- cut(data1$BedroomAbvGr, 
-                          breaks = breaks_3, labels = c("less than or equal to 5", "More than 5"))
-data2$BedroomAbvGr <- cut(data2$BedroomAbvGr, 
-                          breaks = breaks_3, labels = c("less than or equal to 5", "More than 5"))
+  if (length(unknown_test_levels) > 0) {
+    stop(
+      paste(
+        "Unexpected test level in",
+        col,
+        ":",
+        paste(unknown_test_levels, collapse = ", ")
+      )
+    )
+  }
 
-```
+  train_reg[[col]] <- factor(
+    train_reg[[col]],
+    levels = train_levels
+  )
 
+  test_reg[[col]] <- factor(
+    test_reg[[col]],
+    levels = train_levels
+  )
+}
 
-### Factor Conversion
-
-```{r}
-cols = c("YrSold","FullBath",
-         "HalfBath","BedroomAbvGr","TotRmsAbvGrd",
-         "Fireplaces","YearRemodAdd","OverallQual")
-data1[cols] = lapply(data1[cols], factor)
-data2[cols] = lapply(data2[cols], factor)
-summary(data1)
-summary(data2)
+summary(train_reg)
 ```
 
 ## Exploratory Data Analysis
 
-```{r}
+### Distribution of House Prices
 
-# House price #
-ggplot(data1, aes(x = SalePrice)) +
-  geom_histogram(fill = "blue", color = "black") +
-  xlab("Sales Price $") +
-  ylab("Frequency") +
-  ggtitle("Distribution of Sales Price") +
-  scale_x_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
+```{r}
+ggplot(train_reg, aes(x = SalePrice)) +
+  geom_histogram(
+    bins = 30,
+    fill = "steelblue",
+    color = "black"
+  ) +
+  labs(
+    title = "Distribution of House Sale Prices",
+    x = "Sale Price",
+    y = "Frequency"
+  ) +
   theme_minimal()
+```
 
+### Garage Area and Sale Price
 
-# Garage size #
-ggplot(data1, aes(x = GarageArea)) +
-  geom_histogram(fill = "blue", color = "black") +
-  xlab("Garage size in squre feet") +
-  ylab("Frequency") +
-  ggtitle("Distribution of Garage Size")  +
+```{r}
+ggplot(
+  train_reg,
+  aes(x = GarageArea, y = SalePrice)
+) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Garage Area vs Sale Price",
+    x = "Garage Area",
+    y = "Sale Price"
+  ) +
   theme_minimal()
+```
 
+### Finished Basement Area and Sale Price
 
-# Finished suqres size #
-ggplot(data1, aes(x = BsmtFinSF1)) +
-  geom_histogram(fill = "blue", color = "black") +
-  xlab("Finish squre feet size") +
-  ylab("Frequency") +
-  ggtitle("Distribution of Finish squre feet size")  +
+```{r}
+ggplot(
+  train_reg,
+  aes(x = BsmtFinSF1, y = SalePrice)
+) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Finished Basement Area vs Sale Price",
+    x = "Finished Basement Area",
+    y = "Sale Price"
+  ) +
   theme_minimal()
-
-
-# OverallQual
-count_table <- table(data1$OverallQual)
-count_df <- as.data.frame(count_table)
-colnames(count_df)[colnames(count_df) == "Var1"] <- "Overall_Quality"
-count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
-ggplot(count_df, aes(x = Overall_Quality, y = Percentage, fill = Overall_Quality)) +
-  geom_bar(stat = "identity", color = "black") +
-  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
-  xlab("Overall Quality Level") +
-  ylab("Percentage") +
-  ggtitle("Overall Quality") 
-
-
-# YearRemodAdd
-count_table <- table(data1$YearRemodAdd)
-count_df <- as.data.frame(count_table)
-colnames(count_df)[colnames(count_df) == "Var1"] <- "Year_RemodAdd"
-count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
-ggplot(count_df, aes(x = Year_RemodAdd, y = Percentage, fill = Year_RemodAdd)) +
-  geom_bar(stat = "identity", color = "black") +
-  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
-  xlab("Modified Year") +
-  ylab("Percentage") +
-  ggtitle("Modified Year") 
-
-
-# Full bathrooms
-count_table <- table(data1$FullBath)
-count_df <- as.data.frame(count_table)
-colnames(count_df)[colnames(count_df) == "Var1"] <- "FullBath"
-count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
-ggplot(count_df, aes(x = FullBath, y = Percentage, fill = FullBath)) +
-  geom_bar(stat = "identity", color = "black") +
-  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
-  xlab("Number of full bathrooms") +
-  ylab("Percentage") +
-  ggtitle("Number of full bathrooms") 
-
-
-# LotArea vs FullBath
-ggplot(data1, aes(x = FullBath, y = LotArea, fill = FullBath)) +
-  geom_boxplot() +
-  xlab("Category") +
-  ylab("Lot size in square feet") +
-  ggtitle("Number of full bathrooms vs Lot size in square feet") +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-# BsmtFinSF1 vs OverallQual
-ggplot(data1, aes(x = OverallQual, y = BsmtFinSF1, fill = OverallQual)) +
-  geom_boxplot() +
-  xlab("Category") +
-  ylab("Finished squre size in feet") +
-  ggtitle("Overall Quality vs Finished squre size in feet") +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-# LotArea vs SalePrice vs Number of full baths
-ggplot(data1, aes(x = LotArea, y = SalePrice, color = FullBath)) +
-  geom_point() +
-  labs(title = "Scatterplot", x = "LotArea", y = "SalePrice") +
-  xlab("Lot area size in square feet") +
-  ylab("Sales Price $") +
-  ggtitle("Sales Price vs Lot area size in square feet vs Number of full baths") +
-  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
-  theme_minimal()
-
-# GarageArea vs SalePrice vs Fireplaces
-ggplot(data1, aes(x = GarageArea, y = SalePrice, color = Fireplaces)) +
-  geom_point() +
-  labs(title = "Scatterplot", x = "GarageArea", y = "SalePrice") +
-  xlab("Garage size size in square feet") +
-  ylab("Sales Price $") +
-  ggtitle("Sales Price vs Garagae size in square feet vs Number of fire places") +
-  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
-  theme_minimal()
-
-# BsmtFinSF1 vs SalePrice vs HalfBath
-ggplot(data1, aes(x = BsmtFinSF1, y = SalePrice, color = HalfBath)) +
-  geom_point() +
-  labs(title = "Scatterplot", x = "BsmtFinSF1", y = "SalePrice") +
-  xlab("Finished squre size in feet") +
-  ylab("Sales Price $") +
-  ggtitle("Sales Price vs Finished squre size in feet vs Number of Half bathrooms") +
-  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
-  theme_minimal()
-
-
-# SalePrice vs YrSold
-ggplot(data1, aes(x = YrSold, y = SalePrice, fill = YrSold)) +
-  geom_boxplot() +
-  xlab("House Sold Year") +
-  ylab("Sales Price $") +
-  ggtitle("House Sold Year vs Sales Price") +
-  scale_y_continuous(labels = scales::comma_format(scale = 1e-3, suffix = "K")) +
-  theme_minimal() +
-  theme(legend.position = "none")
-
 ```
 
-
-####  Correlation test
-##### Spearman Correlation
+### Overall Quality Distribution
 
 ```{r}
-cor_vars <- subset(data1, select = c("LotArea", "GarageArea", "BsmtFinSF1"))
-corrplot(cor(cor_vars, method = "spearman"), method = "color", addCoef.col = "black", tl.col = "black")
-
-
-```
-
-#####  Goodman Kruskal plot
-
-```{r}
-selected_vars <- c("FullBath", "HalfBath", "OverallQual", "BedroomAbvGr", "TotRmsAbvGrd", "Fireplaces", "YrSold")
-kruskal_vars <- subset(data1, select = selected_vars)
-plot(GKtauDataframe(kruskal_vars))
-
-```
-
-## House Price Regression
-
-###  Create a linear regression model
-
-```{r}
-lm_model <- train(SalePrice ~ ., data = data1, method = "lm")
-
-
-```
-
-#### Model Performances
-
-
-```{r}
-predictions <- predict(lm_model, newdata = data2)
-mse <- mean((data2$SalePrice - predictions)^2)
-cat("MSE:", mse, "\n")
-rmse <- sqrt(mse)
-print(paste("Root Mean Squared Error: ", rmse))
-r_squared_value <- cor(data2$SalePrice, predictions)^2
-cat("R-squared:", r_squared_value, "\n")
-
-```
-
-### Random Forest Model - Without Hyper-parameter tuning
-
-
-```{r}
-set.seed(345)
-model_rf <- train(SalePrice ~ ., data = data1, method = "rf")
-
-```
-
-####  Random Forest Model - Model Performances
-
-
-```{r}
-predictions_rf_1 <- predict(model_rf, newdata = data2)
-mse_rf_1 <- mean((data2$SalePrice - predictions_rf_1)^2)
-print(paste("Mean Squared Error: ", mse_rf_1))
-rmse_rf_1 <- sqrt(mse_rf_1)
-print(paste("Root Mean Squared Error: ", rmse_rf_1))
-r_squared_value_rf_1 <- R2(data2$SalePrice, predictions_rf_1)
-cat("R-squared:", r_squared_value_rf_1, "\n")
-
-```
-
-###  Random Forest Model - With Hyper-parameter tuning
-
-
-```{r}
-set.seed(345)
-ctrl <- trainControl(method = "cv", number = 7)
-grid <- expand.grid(mtry = c(2, 4, 6, 8),
-                    min_samples_split = c(2, 5, 10, 15),
-                    max_depth = c(5, 10, 15, 20))
-model_rf_2 <- train(SalePrice ~ ., data = data1, method = "rf", trControl = ctrl)
-
-```
-
-#### Random Forest Model - Model Performances
-
-
-```{r}
-predictions_rf_2 <- predict(model_rf_2, newdata = data2)
-mse_rf_2 <- mean((data2$SalePrice - predictions_rf_2)^2)
-rmse_rf_2 <- sqrt(mse_rf_2)
-print(paste("Mean Squared Error: ", mse_rf_2))
-print(paste("Root Mean Squared Error: ", rmse_rf_2))
-r_squared_value_rf_2 <- R2(data2$SalePrice, predictions_rf_2)
-cat("R-squared:", r_squared_value_rf_2, "\n")
-
-```
-
-
-## House Quality Classification
-
-
-#### Load the data sets
-
-```{r}
-data1 = read.csv("data/house_prices_train.csv")
-data2 = read_excel("data/house_prices_test.xlsx")
-data2 <- as.data.frame(data2)
-data2[, sapply(data2, is.numeric)] <- lapply(data2[, sapply(data2, is.numeric)], as.integer)
-```
-
-
-#### Drop columns
-
-
-```{r}
-drop_cols = c("YearBuilt")
-data1[drop_cols] = NULL
-data2[drop_cols] = NULL
-```
-
-#### Variable Conversions
-
-```{r}
-breaks_1 <- c(1949, 2000, 2011)
-data1$YearRemodAdd <- cut(data1$YearRemodAdd, 
-                               breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
-data2$YearRemodAdd <- cut(data2$YearRemodAdd, 
-                              breaks = breaks_1, labels = c("on or before 2000", "after 2000"))
-
-breaks_2 <- c(0, 5, 10, 15)
-data1$TotRmsAbvGrd <- cut(data1$TotRmsAbvGrd, 
-                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
-data2$TotRmsAbvGrd <- cut(data2$TotRmsAbvGrd, 
-                          breaks = breaks_2, labels = c("0-5", "5-10", "10-15"))
-
-breaks_3 <- c(-1, 5, 15)
-data1$BedroomAbvGr <- cut(data1$BedroomAbvGr, 
-                          breaks = breaks_3, labels = c("less than or equal to", "More than 5"))
-data2$BedroomAbvGr <- cut(data2$BedroomAbvGr, 
-                          breaks = breaks_3, labels = c("less than or equal to", "More than 5"))
-
-```
-
-
-#### Factorized
-
-```{r}
-cols = c("YrSold","FullBath",
-         "HalfBath","BedroomAbvGr","TotRmsAbvGrd",
-         "Fireplaces","YearRemodAdd")
-data1[cols] = lapply(data1[cols], factor)
-data2[cols] = lapply(data2[cols], factor)
-```
-
-#### Create the Response and other missing levels
-
-```{r}
-training_levels_1 <- levels(data1$FullBath)
-training_levels_2 <- levels(data1$BedroomAbvGr)
-training_levels_3 <- levels(data1$Fireplaces)
-data2$FullBath <- forcats::fct_expand(data2$FullBath, training_levels_1)
-data2$BedroomAbvGr <- forcats::fct_expand(data2$BedroomAbvGr, training_levels_2)
-data2$Fireplaces <- forcats::fct_expand(data2$Fireplaces, training_levels_3)
-
-
-data1$OverallQual <- cut(data1$OverallQual,breaks = c(-Inf, 6, Inf),labels = c("0", "1"))
-data2$OverallQual <- cut(data2$OverallQual,breaks = c(-Inf, 6, Inf),labels = c("0", "1"))
-data1$OverallQual <-factor(data1$OverallQual,levels = c("0","1"),labels = c(0,1))
-data2$OverallQual <- factor(data2$OverallQual,levels = c("0","1"),labels = c(0,1))
-data1$OverallQual <- relevel(data1$OverallQual, ref = "1")
-data2$OverallQual <- relevel(data2$OverallQual, ref = "1")
-response_col_name <- "OverallQual"
-test_labels <- factor(data2[, response_col_name])
-```
-
-
-#### Imbalanceness of the response variable
-
-```{r} 
-
-count_table <- table(data1$OverallQual)
-count_df <- as.data.frame(count_table)
-colnames(count_df)[colnames(count_df) == "Var1"] <- "Overall_Quality"
-count_df$Percentage <- count_df$Freq / sum(count_df$Freq) * 100
-ggplot(count_df, aes(x = Overall_Quality, y = Percentage, fill = Overall_Quality)) +
-  geom_bar(stat = "identity", color = "black") +
-  geom_text(aes(label = paste0(round(Percentage, 1), "%")), vjust = -0.5, color = "black") +
-  xlab("Overall Quality Level") +
-  ylab("Percentage") +
-  ggtitle("Overall Quality") 
-```
-
-#### XGBoost Model (Without any sampling) - With hyper parameter tuning
-
-
-```{r}
-customSummary <- function(data, lev = NULL, model = NULL) {
-  confusionMatrixObj <- confusionMatrix(data$pred, data$obs, positive = lev[1])
-  precision <- posPredValue(data$pred, data$obs, positive = lev[1])
-  recall <- confusionMatrixObj$byClass["Sensitivity"]
-  F1 <- 2 * precision * recall / (precision + recall)
-  
-  out <- c(precision, recall, F1)
-  names(out) <- c("Precision", "Recall", "F1-Score")
-  out
-}
-
-ctrl <- trainControl(
-  method = "cv",
-  number = 5,
-  search = 'grid',
-  savePredictions = "all",
-  summaryFunction = customSummary
+quality_counts <- as.data.frame(
+  table(train_reg$OverallQual)
 )
 
-grid <- expand.grid(
-  nrounds = c(50, 100),         # Number of boosting rounds
-  max_depth = c(3, 6, 9),          # Maximum tree depth
-  eta = c(0.01, 0.1, 1),           # Learning rate
-  gamma = 0,                    # Minimum loss reduction for further splits
-  colsample_bytree = c(0, 1),         # Subsample ratio of columns when constructing each tree
-  min_child_weight = c(0, 1),         # Minimum sum of instance weight (hessian) needed in a child
-  subsample = c(1, 4, 8)                 # Subsample ratio of the training instance
+names(quality_counts) <- c(
+  "OverallQuality",
+  "Count"
 )
 
-set.seed(345)
-model1 <- train(
-  OverallQual ~ .,
-  data = data1,
-  method = "xgbTree", 
-  trControl = ctrl,
-  tuneGrid = grid
-)
+quality_counts$Percentage <-
+  100 * quality_counts$Count /
+  sum(quality_counts$Count)
 
+ggplot(
+  quality_counts,
+  aes(
+    x = OverallQuality,
+    y = Percentage
+  )
+) +
+  geom_col(fill = "steelblue") +
+  geom_text(
+    aes(
+      label = paste0(
+        round(Percentage, 1),
+        "%"
+      )
+    ),
+    vjust = -0.4
+  ) +
+  labs(
+    title = "Distribution of Overall Quality",
+    x = "Overall Quality",
+    y = "Percentage"
+  ) +
+  theme_minimal()
 ```
 
+## Regression Modeling
 
-#### XGBoost Model (Without any sampling) - With hyper parameter tuning (Model Performances)
+Two approaches are evaluated for house-price prediction:
 
+- Multiple Linear Regression
+- Random Forest Regression
 
-```{r}
-predictions1 <- predict(model1, data2)
-confusionMatrix(predictions1, data2$OverallQual, mode = "everything")
-
-```
-
-
-#### XGBoost Model (Oversampling) - With hyper parameter tuning
-
+### Evaluation Function
 
 ```{r}
-set.seed(345)
-table(data1$OverallQual)
-data3 <- ovun.sample(OverallQual ~ ., data = data1, method = "over", N = 1116)$data
-set.seed(345)
-model2 <- train(
-  OverallQual ~ .,
-  data = data3,
-  method = "xgbTree", 
-  trControl = ctrl,
-  tuneGrid = grid
-)
+regression_metrics <- function(actual, predicted) {
 
-```
-
-
-#### XGBoost Model (Oversampling) - With hyper parameter tuning (Model Performances)
-
-
-```{r}
-predictions2 <- predict(model2, data2)
-confusionMatrix(predictions2, data2$OverallQual, mode = "everything")
-
-```
-
-
-#### XGBoost Model (Undersampling) - With hyper parameter tuning 
-
-
-```{r}
-set.seed(345)
-data4 <- ovun.sample(OverallQual ~ ., data = data1, method = "under", N = 684)$data
-model3 <- train(
-  OverallQual ~ .,
-  data = data4,
-  method = "xgbTree", 
-  trControl = ctrl,
-  tuneGrid = grid
-)
-
-```
-
-
-#### XGBoost Model (Undersampling) - With hyper parameter tuning (Model Performances)
-
-
-```{r}
-predictions3 <- predict(model3, data2)
-confusionMatrix(predictions3, data2$OverallQual, mode = "everything")
-
-```
-
-
-#### VIP plot XGBoost Model (Undersampling)
-
-
-```{r}
-
-vip(model3$finalModel, num_features = 10) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(size = 20, face = "bold"),
-    axis.title = element_text(size = 14),
-    axis.text = element_text(size = 12),
-    legend.title = element_text(size = 14),
-    legend.text = element_text(size = 12)
+  mse <- mean(
+    (actual - predicted)^2
   )
 
+  rmse <- sqrt(mse)
+
+  r_squared <- cor(
+    actual,
+    predicted
+  )^2
+
+  data.frame(
+    MSE = mse,
+    RMSE = rmse,
+    R_Squared = r_squared
+  )
+}
+```
+
+## Multiple Linear Regression
+
+```{r}
+lm_model <- lm(
+  SalePrice ~ .,
+  data = train_reg
+)
+
+lm_predictions <- predict(
+  lm_model,
+  newdata = test_reg
+)
+
+lm_results <- regression_metrics(
+  test_reg$SalePrice,
+  lm_predictions
+)
+
+lm_results
+```
+
+## Random Forest Regression
+
+```{r}
+set.seed(345)
+
+rf_model <- randomForest(
+  SalePrice ~ .,
+  data = train_reg,
+  ntree = 500,
+  importance = TRUE
+)
+
+rf_predictions <- predict(
+  rf_model,
+  newdata = test_reg
+)
+
+rf_results <- regression_metrics(
+  test_reg$SalePrice,
+  rf_predictions
+)
+
+rf_results
+```
+
+## Tuned Random Forest
+
+A small tuning process is performed over different values of `mtry`.
+
+```{r}
+set.seed(345)
+
+candidate_mtry <- c(
+  2,
+  4,
+  6,
+  8
+)
+
+candidate_mtry <- candidate_mtry[
+  candidate_mtry <
+    ncol(train_reg)
+]
+
+oob_errors <- numeric(
+  length(candidate_mtry)
+)
+
+rf_models <- vector(
+  "list",
+  length(candidate_mtry)
+)
+
+for (i in seq_along(candidate_mtry)) {
+
+  rf_models[[i]] <- randomForest(
+    SalePrice ~ .,
+    data = train_reg,
+    ntree = 500,
+    mtry = candidate_mtry[i],
+    importance = TRUE
+  )
+
+  oob_errors[i] <-
+    tail(
+      rf_models[[i]]$mse,
+      1
+    )
+}
+
+best_index <- which.min(
+  oob_errors
+)
+
+best_mtry <- candidate_mtry[
+  best_index
+]
+
+cat(
+  "Best mtry:",
+  best_mtry,
+  "\n"
+)
+
+rf_tuned_model <-
+  rf_models[[best_index]]
+
+rf_tuned_predictions <- predict(
+  rf_tuned_model,
+  newdata = test_reg
+)
+
+rf_tuned_results <- regression_metrics(
+  test_reg$SalePrice,
+  rf_tuned_predictions
+)
+
+rf_tuned_results
+```
+
+## Regression Model Comparison
+
+```{r}
+regression_comparison <- rbind(
+
+  data.frame(
+    Model = "Multiple Linear Regression",
+    lm_results
+  ),
+
+  data.frame(
+    Model = "Random Forest",
+    rf_results
+  ),
+
+  data.frame(
+    Model = "Tuned Random Forest",
+    rf_tuned_results
+  )
+)
+
+regression_comparison
+```
+
+## Random Forest Feature Importance
+
+```{r}
+rf_importance <- importance(
+  rf_tuned_model
+)
+
+rf_importance_df <- data.frame(
+  Feature = rownames(rf_importance),
+  Importance = rf_importance[, 1]
+)
+
+rf_importance_df <- rf_importance_df[
+  order(
+    rf_importance_df$Importance,
+    decreasing = TRUE
+  ),
+]
+
+head(
+  rf_importance_df,
+  10
+)
+```
+
+# House Quality Classification
+
+The second modeling problem classifies houses according to overall quality.
+
+Properties with an overall quality score of **7 or higher** are assigned to the positive class.
+
+```{r}
+train_cls <- prepare_data(train_raw)
+test_cls <- prepare_data(test_raw)
+
+train_cls$OverallQual <- ifelse(
+  train_raw$OverallQual >= 7,
+  1,
+  0
+)
+
+test_cls$OverallQual <- ifelse(
+  test_raw$OverallQual >= 7,
+  1,
+  0
+)
+```
+
+## Prepare Categorical Predictors
+
+```{r}
+classification_factor_cols <- c(
+  "YrSold",
+  "FullBath",
+  "HalfBath",
+  "BedroomAbvGr",
+  "TotRmsAbvGrd",
+  "Fireplaces",
+  "YearRemodAdd"
+)
+
+for (col in classification_factor_cols) {
+
+  all_levels <- unique(
+    c(
+      as.character(train_cls[[col]]),
+      as.character(test_cls[[col]])
+    )
+  )
+
+  train_cls[[col]] <- factor(
+    train_cls[[col]],
+    levels = all_levels
+  )
+
+  test_cls[[col]] <- factor(
+    test_cls[[col]],
+    levels = all_levels
+  )
+}
+```
+
+## Class Distribution
+
+```{r}
+class_distribution <- as.data.frame(
+  table(train_cls$OverallQual)
+)
+
+names(class_distribution) <- c(
+  "Class",
+  "Count"
+)
+
+class_distribution$Percentage <-
+  100 *
+  class_distribution$Count /
+  sum(class_distribution$Count)
+
+class_distribution
+```
+
+```{r}
+ggplot(
+  class_distribution,
+  aes(
+    x = Class,
+    y = Percentage
+  )
+) +
+  geom_col(fill = "steelblue") +
+  geom_text(
+    aes(
+      label = paste0(
+        round(Percentage, 1),
+        "%"
+      )
+    ),
+    vjust = -0.4
+  ) +
+  labs(
+    title = "House Quality Class Distribution",
+    x = "Quality Class",
+    y = "Percentage"
+  ) +
+  theme_minimal()
+```
+
+## XGBoost Helper Functions
+
+This version uses the native XGBoost interface instead of the older `caret::train(method = "xgbTree")` interface.
+
+```{r}
+make_xgb_matrices <- function(
+  training_data,
+  testing_data
+) {
+
+  train_x <- training_data[
+    ,
+    names(training_data) != "OverallQual"
+  ]
+
+  test_x <- testing_data[
+    ,
+    names(testing_data) != "OverallQual"
+  ]
+
+  combined <- rbind(
+    train_x,
+    test_x
+  )
+
+  combined_matrix <- model.matrix(
+    ~ . - 1,
+    data = combined
+  )
+
+  n_train <- nrow(
+    train_x
+  )
+
+  x_train <- combined_matrix[
+    1:n_train,
+    ,
+    drop = FALSE
+  ]
+
+  x_test <- combined_matrix[
+    (n_train + 1):
+      nrow(combined_matrix),
+    ,
+    drop = FALSE
+  ]
+
+  list(
+    train = x_train,
+    test = x_test
+  )
+}
+```
+
+### Classification Evaluation
+
+```{r}
+classification_metrics <- function(
+  actual,
+  predicted
+) {
+
+  actual <- as.integer(
+    actual
+  )
+
+  predicted <- as.integer(
+    predicted
+  )
+
+  TP <- sum(
+    predicted == 1 &
+    actual == 1
+  )
+
+  TN <- sum(
+    predicted == 0 &
+    actual == 0
+  )
+
+  FP <- sum(
+    predicted == 1 &
+    actual == 0
+  )
+
+  FN <- sum(
+    predicted == 0 &
+    actual == 1
+  )
+
+  accuracy <-
+    (TP + TN) /
+    (TP + TN + FP + FN)
+
+  sensitivity <- ifelse(
+    TP + FN == 0,
+    NA,
+    TP / (TP + FN)
+  )
+
+  specificity <- ifelse(
+    TN + FP == 0,
+    NA,
+    TN / (TN + FP)
+  )
+
+  precision <- ifelse(
+    TP + FP == 0,
+    NA,
+    TP / (TP + FP)
+  )
+
+  f1 <- ifelse(
+    is.na(precision) |
+      is.na(sensitivity) |
+      precision + sensitivity == 0,
+    NA,
+    2 *
+      precision *
+      sensitivity /
+      (precision + sensitivity)
+  )
+
+  data.frame(
+    Accuracy = accuracy,
+    Sensitivity = sensitivity,
+    Specificity = specificity,
+    Precision = precision,
+    F1 = f1
+  )
+}
+```
+
+## XGBoost Training Function
+
+```{r}
+fit_xgb_model <- function(
+  training_data,
+  testing_data,
+  seed = 345
+) {
+
+  set.seed(seed)
+
+  matrices <- make_xgb_matrices(
+    training_data,
+    testing_data
+  )
+
+  y_train <- as.numeric(
+    training_data$OverallQual
+  )
+
+  dtrain <- xgb.DMatrix(
+    data = matrices$train,
+    label = y_train
+  )
+
+  dtest <- xgb.DMatrix(
+    data = matrices$test
+  )
+
+  params <- list(
+    objective = "binary:logistic",
+    eval_metric = "logloss",
+    max_depth = 6,
+    eta = 0.1,
+    gamma = 0,
+    min_child_weight = 1,
+    subsample = 1,
+    colsample_bytree = 1
+  )
+
+  model <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = 100,
+    verbose = 0
+  )
+
+  probability <- predict(
+    model,
+    dtest
+  )
+
+  prediction <- ifelse(
+    probability >= 0.5,
+    1,
+    0
+  )
+
+  list(
+    model = model,
+    prediction = prediction,
+    probability = probability,
+    feature_names = colnames(
+      matrices$train
+    )
+  )
+}
+```
+
+# XGBoost — No Sampling
+
+```{r}
+xgb_no_sampling <- fit_xgb_model(
+  train_cls,
+  test_cls
+)
+
+no_sampling_results <-
+  classification_metrics(
+    test_cls$OverallQual,
+    xgb_no_sampling$prediction
+  )
+
+no_sampling_results
+```
+
+### Confusion Matrix — No Sampling
+
+```{r}
+table(
+  Predicted =
+    xgb_no_sampling$prediction,
+  Actual =
+    test_cls$OverallQual
+)
+```
+
+# Oversampling
+
+The minority class is oversampled to create a more balanced training dataset.
+
+```{r}
+oversample_binary <- function(
+  df,
+  target = "OverallQual",
+  seed = 345
+) {
+
+  set.seed(seed)
+
+  class0 <- df[
+    df[[target]] == 0,
+  ]
+
+  class1 <- df[
+    df[[target]] == 1,
+  ]
+
+  target_size <- max(
+    nrow(class0),
+    nrow(class1)
+  )
+
+  class0_over <- class0[
+    sample(
+      seq_len(nrow(class0)),
+      target_size,
+      replace = TRUE
+    ),
+  ]
+
+  class1_over <- class1[
+    sample(
+      seq_len(nrow(class1)),
+      target_size,
+      replace = TRUE
+    ),
+  ]
+
+  result <- rbind(
+    class0_over,
+    class1_over
+  )
+
+  result[
+    sample(seq_len(nrow(result))),
+  ]
+}
+
+train_over <- oversample_binary(
+  train_cls
+)
+
+table(
+  train_over$OverallQual
+)
+```
+
+## XGBoost — Oversampling
+
+```{r}
+xgb_over <- fit_xgb_model(
+  train_over,
+  test_cls
+)
+
+over_sampling_results <-
+  classification_metrics(
+    test_cls$OverallQual,
+    xgb_over$prediction
+  )
+
+over_sampling_results
+```
+
+### Confusion Matrix — Oversampling
+
+```{r}
+table(
+  Predicted =
+    xgb_over$prediction,
+  Actual =
+    test_cls$OverallQual
+)
+```
+
+# Undersampling
+
+The majority class is undersampled to create a balanced training dataset.
+
+```{r}
+undersample_binary <- function(
+  df,
+  target = "OverallQual",
+  seed = 345
+) {
+
+  set.seed(seed)
+
+  class0 <- df[
+    df[[target]] == 0,
+  ]
+
+  class1 <- df[
+    df[[target]] == 1,
+  ]
+
+  target_size <- min(
+    nrow(class0),
+    nrow(class1)
+  )
+
+  class0_under <- class0[
+    sample(
+      seq_len(nrow(class0)),
+      target_size,
+      replace = FALSE
+    ),
+  ]
+
+  class1_under <- class1[
+    sample(
+      seq_len(nrow(class1)),
+      target_size,
+      replace = FALSE
+    ),
+  ]
+
+  result <- rbind(
+    class0_under,
+    class1_under
+  )
+
+  result[
+    sample(seq_len(nrow(result))),
+  ]
+}
+
+train_under <- undersample_binary(
+  train_cls
+)
+
+table(
+  train_under$OverallQual
+)
+```
+
+## XGBoost — Undersampling
+
+```{r}
+xgb_under <- fit_xgb_model(
+  train_under,
+  test_cls
+)
+
+under_sampling_results <-
+  classification_metrics(
+    test_cls$OverallQual,
+    xgb_under$prediction
+  )
+
+under_sampling_results
+```
+
+### Confusion Matrix — Undersampling
+
+```{r}
+table(
+  Predicted =
+    xgb_under$prediction,
+  Actual =
+    test_cls$OverallQual
+)
+```
+
+# Classification Model Comparison
+
+```{r}
+classification_comparison <- rbind(
+
+  data.frame(
+    Model = "XGBoost - No Sampling",
+    no_sampling_results
+  ),
+
+  data.frame(
+    Model = "XGBoost - Oversampling",
+    over_sampling_results
+  ),
+
+  data.frame(
+    Model = "XGBoost - Undersampling",
+    under_sampling_results
+  )
+)
+
+classification_comparison
+```
+
+# XGBoost Feature Importance
+
+Feature importance is calculated from the undersampled XGBoost model.
+
+```{r}
+xgb_importance <- xgb.importance(
+  feature_names =
+    xgb_under$feature_names,
+  model =
+    xgb_under$model
+)
+
+head(
+  xgb_importance,
+  10
+)
+```
+
+```{r}
+top_importance <- head(
+  xgb_importance,
+  10
+)
+
+ggplot(
+  top_importance,
+  aes(
+    x = reorder(
+      Feature,
+      Gain
+    ),
+    y = Gain
+  )
+) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title =
+      "Top XGBoost Feature Importance",
+    x = "Feature",
+    y = "Gain"
+  ) +
+  theme_minimal()
+```
+
+# Key Insights
+
+The analysis demonstrates several important points:
+
+- House prices depend on a combination of property characteristics rather than a single factor.
+- Lot size, garage area, finished basement area, bathrooms, bedrooms, fireplaces, and overall quality can contribute to property value.
+- Regression and ensemble approaches can be compared using MSE, RMSE, and R-squared.
+- Class imbalance can materially affect classification performance.
+- Oversampling and undersampling provide alternative approaches for improving minority-class prediction.
+- Feature importance helps identify the variables contributing most strongly to model predictions.
+
+# Session Information
+
+```{r}
+sessionInfo()
 ```
